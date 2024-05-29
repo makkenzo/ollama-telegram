@@ -4,6 +4,7 @@ from aiogram.filters.command import Command, CommandStart
 from aiogram.types import Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from func.interactions import *
+from difflib import SequenceMatcher
 import asyncio
 import traceback
 import io
@@ -33,6 +34,8 @@ modelname = os.getenv("INITMODEL")
 mention = None
 CHAT_TYPE_GROUP = "group"
 CHAT_TYPE_SUPERGROUP = "supergroup"
+USER_ANSWERS_DICT = {}
+USER_ANSWERS_LOCK = asyncio.Lock()
 
 
 def is_mentioned_in_group_or_supergroup(message):
@@ -40,6 +43,10 @@ def is_mentioned_in_group_or_supergroup(message):
         (message.text is not None and message.text.startswith(mention))
         or (message.caption is not None and message.caption.startswith(mention))
     )
+
+
+def is_similar(question1, question2, threshold=0.8):
+    return SequenceMatcher(None, question1, question2).ratio() > threshold
 
 
 async def get_bot_info():
@@ -67,7 +74,7 @@ async def command_reset_handler(message: Message) -> None:
         if message.from_user.id in ACTIVE_CHATS:
             async with ACTIVE_CHATS_LOCK:
                 ACTIVE_CHATS.pop(message.from_user.id)
-            logging.info(f"Chat has been reset for {message.from_user.first_name}")
+            logging.info(f"\033[92mChat has been reset for {message.from_user.first_name}\033[0m")
             await bot.send_message(
                 chat_id=message.chat.id,
                 text="Chat has been reset",
@@ -163,16 +170,41 @@ async def about_callback_handler(query: types.CallbackQuery):
 @perms_allowed
 async def handle_message(message: types.Message):
     await get_bot_info()
+    chat_type = message.chat.type
+    logging.info(f"\033[92m [INFO] {chat_type} \033[92m")
+
     if message.chat.type == "private":
         await ollama_request(message)
-    if is_mentioned_in_group_or_supergroup(message):
-        if message.text is not None:
-            text_without_mention = message.text.replace(mention, "").strip()
-            prompt = text_without_mention
-        else:
-            text_without_mention = message.caption.replace(mention, "").strip()
-            prompt = text_without_mention
-        await ollama_request(message, prompt)
+    elif message.chat.type == CHAT_TYPE_GROUP:
+        if message.reply_to_message and message.reply_to_message.text:
+            original_question = message.reply_to_message.text.strip()
+            answer = message.text.strip()
+            async with USER_ANSWERS_LOCK:
+                USER_ANSWERS_DICT[original_question] = answer
+
+            await bot.send_message(
+                chat_id=message.chat.id,
+                text=f"Ответ был успешно сохранен.\nВопрос: {original_question}",
+            )
+        elif message.text and message.text.endswith("?"):
+            prompt = message.text.strip()
+            prev_answer = ""
+
+            async with USER_ANSWERS_LOCK:
+                for question, answer in USER_ANSWERS_DICT.items():
+                    if is_similar(question, prompt):
+                        prev_answer = answer
+                        break
+
+            if prev_answer:
+                res = await ollama_request_without_sending(message, prompt)
+
+                text = f"{res.strip()}\n\n⚙️ {modelname}"
+
+                await bot.send_message(
+                    chat_id=message.chat.id,
+                    text=f"Похожий вопрос: {prompt}\nОтвет: {prev_answer}\n\nСгенерированный ответ: {text}",
+                )
 
 
 async def process_image(message):
@@ -223,7 +255,7 @@ async def handle_response(message, response_data, full_response):
                     {"role": "assistant", "content": full_response_stripped}
                 )
         logging.info(
-            f"[Response]: '{full_response_stripped}' for {message.from_user.first_name} {message.from_user.last_name}"
+            f"\033[92m[Response]: '{full_response_stripped}' for {message.from_user.first_name} {message.from_user.last_name}\033[0m"
         )
         return True
     return False
@@ -247,7 +279,7 @@ async def ollama_request(message: types.Message, prompt: str = None):
 
         await add_prompt_to_active_chats(message, prompt, image_base64, modelname)
         logging.info(
-            f"[OllamaAPI]: Processing '{prompt}' for {message.from_user.first_name} {message.from_user.last_name}"
+            f"\033[94m[OllamaAPI]: Processing '{prompt}' for {message.from_user.first_name} {message.from_user.last_name}\033[0m"
         )
         payload = ACTIVE_CHATS.get(message.from_user.id)
         async for response_data in generate(payload, modelname, prompt):
@@ -260,6 +292,43 @@ async def ollama_request(message: types.Message, prompt: str = None):
             if any([c in chunk for c in ".\n!?"]) or response_data.get("done"):
                 if await handle_response(message, response_data, full_response):
                     break
+
+    except Exception as e:
+        print(f"-----\n[OllamaAPI-ERR] CAUGHT FAULT!\n{traceback.format_exc()}\n-----")
+        await bot.send_message(
+            chat_id=message.chat.id,
+            text=f"Something went wrong.",
+            parse_mode=ParseMode.HTML,
+        )
+
+
+async def ollama_request_without_sending(message: types.Message, prompt: str = None):
+    try:
+        full_response = ""
+        image_base64 = await process_image(message)
+        if prompt is None:
+            prompt = message.text or message.caption
+
+        await add_prompt_to_active_chats(message, prompt, image_base64, modelname)
+        logging.info(
+            f"\033[94m[OllamaAPI]: Processing '{prompt}' for {message.from_user.first_name} {message.from_user.last_name}\033[0m"
+        )
+        payload = ACTIVE_CHATS.get(message.from_user.id)
+        async for response_data in generate(payload, modelname, prompt):
+            msg = response_data.get("message")
+            if msg is None:
+                continue
+            chunk = msg.get("content", "")
+            full_response += chunk
+
+            if any([c in chunk for c in ".\n!?"]) or response_data.get("done"):
+                break
+
+        logging.info(
+            f"\033[92m[Response]: '{full_response}' for {message.from_user.first_name} {message.from_user.last_name}\033[0m"
+        )
+
+        return full_response
 
     except Exception as e:
         print(f"-----\n[OllamaAPI-ERR] CAUGHT FAULT!\n{traceback.format_exc()}\n-----")

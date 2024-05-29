@@ -13,16 +13,16 @@ COPY ./bot /${APPHOMEDIR}
 
 # Configure app home directory
 RUN \
-    addgroup -g "$USER_GID" "$USERNAME" \
-    && adduser --disabled-password -u "$USER_UID" -G "$USERNAME" -h /"$APPHOMEDIR" "$USERNAME" \
-    && chown "$USERNAME:$USERNAME" -R /"$APPHOMEDIR"
+	addgroup -g "$USER_GID" "$USERNAME" \
+	&& adduser --disabled-password -u "$USER_UID" -G "$USERNAME" -h /"$APPHOMEDIR" "$USERNAME" \
+	&& chown "$USERNAME:$USERNAME" -R /"$APPHOMEDIR"
 
 # Install dependency packages, upgrade pip and then install requirements
 RUN \
-    apk add --no-cache gcc g++ \
-    && python -m pip install --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt \
-    && apk del --no-cache gcc g++
+	apk add --no-cache gcc g++ \
+	&& python -m pip install --upgrade pip \
+	&& pip install --no-cache-dir -r requirements.txt \
+	&& apk del --no-cache gcc g++
 
 USER ${USERNAME}
 
